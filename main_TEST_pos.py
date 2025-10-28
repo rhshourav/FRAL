@@ -2,7 +2,7 @@ from ultralytics import YOLO
 import cv2, time, ctypes
 
 # ---- CONFIG ----
-LOCK_DELAY = 10          # seconds after no person seen
+LOCK_DELAY = 5          # seconds after no person seen
 POSE_MODEL = "yolov8n-pose.pt"   # or yolov8s-pose.pt for better accuracy
 CONF_THRESH = 0.5
 
