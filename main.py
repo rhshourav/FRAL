@@ -1,101 +1,122 @@
+# merged_face_pose_lock.py
+import os
+import time
+import ctypes
+import numpy as np
 import cv2
 import face_recognition
-import os
+from ultralytics import YOLO
 
-# ====== FOLDER CONTAINING FACES ======
-faces_DIR = "TranningData"
+# ==== CONFIG ====
+FACES_DIR = "TranningData"           # folder with known faces
+POSE_MODEL = "yolov8n-pose.pt"       # pose model
+CONF_THRESH = 0.5
+LOCK_DELAY = 5                       # seconds after known person leaves
+FACE_SKIP_FRAMES = 2                 # run face recognition every N frames
 
-person_Face = []
-person_Name = []
-check = ""
+# ==== LOAD MODELS ====
+print("[*] Loading models...")
+pose_model = YOLO(POSE_MODEL)
 
-# ====== LOAD AND ENCODE TRAINING IMAGES ======
-for filename in os.listdir(faces_DIR):
-    img_path = os.path.join(faces_DIR, filename)
+# ==== LOAD KNOWN FACES ====
+known_faces = []
+known_names = []
+
+if not os.path.isdir(FACES_DIR):
+    raise RuntimeError(f"[!] Folder not found: {FACES_DIR}")
+
+for filename in os.listdir(FACES_DIR):
+    path = os.path.join(FACES_DIR, filename)
     try:
-        image = face_recognition.load_image_file(img_path)
-        encodings = face_recognition.face_encodings(image)
-        if len(encodings) == 0:
+        img = face_recognition.load_image_file(path)
+        encs = face_recognition.face_encodings(img)
+        if len(encs) == 0:
             print(f"[!] No face found in {filename}, skipping.")
             continue
-        person_Face.append(encodings[0])
-        person_Name.append(os.path.splitext(filename)[0])
+        known_faces.append(encs[0])
+        known_names.append(os.path.splitext(filename)[0])
         print(f"[+] Loaded {filename}")
     except Exception as e:
         print(f"[!] Error loading {filename}: {e}")
 
-print(f"[**] Total faces loaded: {len(person_Face)}")
-if len(person_Face) == 0:
-    print("[!] No valid faces found. Exiting...")
+print(f"[**] Total known faces: {len(known_faces)}")
+if len(known_faces) == 0:
+    print("[!] No known faces loaded. Exiting...")
     exit()
 
-# ====== INITIALIZE WEBCAM ======
-video = cv2.VideoCapture(0)
-print("[**] Starting Video Capture. Press 'q' to exit.")
+# ==== START CAMERA ====
+cap = cv2.VideoCapture(0)
+if not cap.isOpened():
+    raise RuntimeError("Camera not found.")
 
-process_this_frame = True  # for speed optimization
+print("[*] Camera started. Press 'q' to quit.")
+
+frame_count = 0
+last_seen_known_time = time.time()
+current_name = "Unknown"
+posture_state = "Unknown"
 
 while True:
-    ret, frame = video.read()
+    ret, frame = cap.read()
     if not ret:
         print("[!] Failed to grab frame")
         break
 
-    # Resize frame for faster processing
-    small_frame = cv2.resize(frame, (0, 0), fx=0.37, fy=0.37)
-    rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+    frame_count += 1
+    rgb_small = cv2.cvtColor(cv2.resize(frame, (0, 0), fx=0.37, fy=0.37), cv2.COLOR_BGR2RGB)
 
-    face_names = []
-    face_locations = []
+    # ==== FACE RECOGNITION ====
+    if frame_count % FACE_SKIP_FRAMES == 0:
+        face_locations = face_recognition.face_locations(rgb_small)
+        face_encodings = face_recognition.face_encodings(rgb_small, face_locations)
 
-    if process_this_frame:
-        # Find all face locations and encodings in the current frame
-        face_locations = face_recognition.face_locations(rgb_small_frame)
-        face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
-
-        if len(face_locations) == 0:
-            print("No one in frame")
-            # Lock the workstation
-            os.system("rundll32.exe user32.dll,LockWorkStation")
-            # Show message on screen
-            cv2.putText(frame, "No one in frame", (50, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
-        else:
-            for face_encoding in face_encodings:
-                matches = face_recognition.compare_faces(person_Face, face_encoding)
-                name = "Unknown"
-
-                # Use face distance to find best match
-                face_distances = face_recognition.face_distance(person_Face, face_encoding)
+        if len(face_encodings) > 0:
+            match_name = "Unknown"
+            for enc in face_encodings:
+                matches = face_recognition.compare_faces(known_faces, enc)
+                face_distances = face_recognition.face_distance(known_faces, enc)
                 if len(face_distances) > 0:
-                    best_match_index = face_distances.argmin()
-                    if matches[best_match_index]:
-                        name = person_Name[best_match_index]
+                    best_idx = np.argmin(face_distances)
+                    if matches[best_idx]:
+                        match_name = known_names[best_idx]
+                        last_seen_known_time = time.time()
+            current_name = match_name
+        else:
+            current_name = "No face"
 
-                face_names.append(name)
-                print(name)
+    # ==== POSE DETECTION ====
+    results = pose_model(frame, verbose=False)
+    persons = [r for r in results if len(r.keypoints) > 0]
 
-    process_this_frame = not process_this_frame  # skip every other frame
+    if len(persons) == 0:
+        cv2.putText(frame, "No person detected", (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
 
-    # Display results
-    for (top, right, bottom, left), name in zip(face_locations, face_names):
-        # Scale back up
-        top *= 4
-        right *= 4
-        bottom *= 4
-        left *= 4
+        # Lock if timeout exceeded
+        if time.time() - last_seen_known_time > LOCK_DELAY:
+            print("[🔒] Locking workstation (no known person)...")
+            ctypes.windll.user32.LockWorkStation()
+            
+    else:
+        # Get posture
+        kps = persons[0].keypoints.xy[0]
+        if len(kps) >= 13:
+            shoulder_y = (kps[5, 1] + kps[6, 1]) / 2
+            hip_y = (kps[11, 1] + kps[12, 1]) / 2
+            ratio = (hip_y - shoulder_y) / frame.shape[0]
+            posture_state = "Standing" if ratio < 0.25 else "Sitting"
+        else:
+            posture_state = "Unknown"
 
-        # Draw rectangle and label
-        cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
-        cv2.rectangle(frame, (left, bottom - 25), (right, bottom), (0, 255, 0), cv2.FILLED)
-        check = name
-        cv2.putText(frame, name, (left + 6, bottom - 6),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
+    # ==== DRAW OVERLAY ====
+    cv2.putText(frame, f"User: {current_name}", (20, 70),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0) if current_name != "Unknown" else (0, 0, 255), 2)
+    cv2.putText(frame, f"Posture: {posture_state}", (20, 110),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 0), 2)
 
-    cv2.imshow("Face Recognition", frame)
-
+    cv2.imshow("Smart Lock Monitor", frame)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-video.release()
+cap.release()
 cv2.destroyAllWindows()

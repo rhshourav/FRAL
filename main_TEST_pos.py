@@ -35,7 +35,7 @@ while True:
         if time.time() - last_seen_time > LOCK_DELAY:
             print("[🔒] Locking workstation...")
             ctypes.windll.user32.LockWorkStation()
-            break
+
     else:
         last_seen_time = time.time()
         # Take first detected person
