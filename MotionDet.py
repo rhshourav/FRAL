@@ -1,6 +1,8 @@
 import cv2
 import face_recognition
 import os
+import numpy as np
+import time
 
 # ====== FOLDER CONTAINING FACES ======
 faces_DIR = "TranningData"
@@ -33,7 +35,10 @@ if len(person_Face) == 0:
 video = cv2.VideoCapture(0)
 print("[**] Starting Video Capture. Press 'q' to exit.")
 
-process_this_frame = True  # for speed optimization
+process_this_frame = True  # speed optimization
+prev_frame = None          # store previous frame for motion detection
+last_motion_time = time.time()
+motion_timeout = 5  # seconds before we say "no motion"
 
 while True:
     ret, frame = video.read()
@@ -41,58 +46,78 @@ while True:
         print("[!] Failed to grab frame")
         break
 
-    # Resize frame for faster processing
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (21, 21), 0)
+
+    # ===== MOTION DETECTION =====
+    motion_detected = False
+    if prev_frame is None:
+        prev_frame = gray
+        continue
+
+    frame_delta = cv2.absdiff(prev_frame, gray)
+    thresh = cv2.threshold(frame_delta, 25, 255, cv2.THRESH_BINARY)[1]
+    thresh = cv2.dilate(thresh, None, iterations=2)
+    contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    for contour in contours:
+        if cv2.contourArea(contour) > 5000:  # adjust sensitivity
+            motion_detected = True
+            last_motion_time = time.time()
+            break
+
+    prev_frame = gray
+
+    # ===== FACE DETECTION =====
     small_frame = cv2.resize(frame, (0, 0), fx=0.37, fy=0.37)
     rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
-
-    face_names = []
     face_locations = []
+    face_names = []
 
     if process_this_frame:
-        # Find all face locations and encodings in the current frame
         face_locations = face_recognition.face_locations(rgb_small_frame)
         face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
 
         if len(face_locations) == 0:
-            print("No one in frame")
-            # Lock the workstation
-            os.system("rundll32.exe user32.dll,LockWorkStation")
-            # Show message on screen
-            cv2.putText(frame, "No one in frame", (50, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+            print("No faces detected.")
         else:
             for face_encoding in face_encodings:
                 matches = face_recognition.compare_faces(person_Face, face_encoding)
                 name = "Unknown"
 
-                # Use face distance to find best match
                 face_distances = face_recognition.face_distance(person_Face, face_encoding)
                 if len(face_distances) > 0:
-                    best_match_index = face_distances.argmin()
+                    best_match_index = np.argmin(face_distances)
                     if matches[best_match_index]:
                         name = person_Name[best_match_index]
 
                 face_names.append(name)
                 print(name)
 
-    process_this_frame = not process_this_frame  # skip every other frame
+    process_this_frame = not process_this_frame
 
-    # Display results
+    # ===== DISPLAY RESULTS =====
+    if len(face_locations) == 0 and (time.time() - last_motion_time) > motion_timeout:
+        # No faces + no motion for a while
+        text = "No one in frame"
+        print(text)
+        cv2.putText(frame, text, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+
+    elif motion_detected:
+        cv2.putText(frame, "Motion Detected", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+
     for (top, right, bottom, left), name in zip(face_locations, face_names):
-        # Scale back up
         top *= 4
         right *= 4
         bottom *= 4
         left *= 4
 
-        # Draw rectangle and label
         cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
         cv2.rectangle(frame, (left, bottom - 25), (right, bottom), (0, 255, 0), cv2.FILLED)
-        check = name
         cv2.putText(frame, name, (left + 6, bottom - 6),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
 
-    cv2.imshow("Face Recognition", frame)
+    cv2.imshow("Face + Motion Detection", frame)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
