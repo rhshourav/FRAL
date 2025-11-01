@@ -1,116 +1,225 @@
+import cv2
+import face_recognition
 import os
 import time
 import ctypes
 import numpy as np
-import cv2
-import face_recognition
+import threading
+from pynput import mouse
 from ultralytics import YOLO
 
-# ==== CONFIGURATION ====
-FACES_DIR = "../TranningData"
+# === Configuration ===
 POSE_MODEL = "yolov8n-pose.pt"
+LOCK_DELAY = 3
 CONF_THRESH = 0.5
-LOCK_DELAY = 5
-FACE_SKIP_FRAMES = 2
+ADAPTIVE_TOLERANCE = 0.42
+MIN_CONFIDENCE = 55
+faces_DIR = "TranningData"
+MOUSE_INACTIVITY_LIMIT = 10  # seconds before enabling camera
 
-# ==== INITIALIZATION ====
-print("[*] Loading models...")
-pose_model = YOLO(POSE_MODEL)
+# === Global States ===
+last_mouse_move = time.time()
+lock_active = False
+camera_enabled = False
 
-# ==== LOAD KNOWN FACES ====
-known_faces = []
-known_names = []
+# === Mouse inactivity tracker ===
+def on_move(x, y):
+    global last_mouse_move, lock_active, camera_enabled
+    last_mouse_move = time.time()
 
-if not os.path.isdir(FACES_DIR):
-    raise RuntimeError(f"[!] Folder not found: {FACES_DIR}")
+    if camera_enabled:
+        print("[INFO] Mouse moved — pausing camera tracking.")
+        camera_enabled = False
+    if lock_active:
+        print("[INFO] Device unlocked and mouse moved — resetting system.")
+        lock_active = False
 
-for filename in os.listdir(FACES_DIR):
-    path = os.path.join(FACES_DIR, filename)
+def monitor_mouse():
+    with mouse.Listener(on_move=on_move) as listener:
+        listener.join()
+
+threading.Thread(target=monitor_mouse, daemon=True).start()
+
+# === Load known faces ===
+person_Face, person_Name = [], []
+for filename in os.listdir(faces_DIR):
+    img_path = os.path.join(faces_DIR, filename)
     try:
-        img = face_recognition.load_image_file(path)
-        encs = face_recognition.face_encodings(img)
-        if not encs:
-            print(f"[!] No face found in {filename}, skipping.")
+        image = face_recognition.load_image_file(img_path)
+        encodings = face_recognition.face_encodings(image)
+        if len(encodings) == 0:
+            print(f"No face found in {filename}, skipping.")
             continue
-        known_faces.append(encs[0])
-        known_names.append(os.path.splitext(filename)[0])
-        print(f"[+] Loaded {filename}")
+        person_Face.append(encodings[0])
+        person_Name.append(os.path.splitext(filename)[0])
+        print(f"Loaded face for {os.path.splitext(filename)[0]}")
     except Exception as e:
-        print(f"[!] Error loading {filename}: {e}")
+        print(f"Error loading {filename}: {e}")
 
-if not known_faces:
-    raise RuntimeError("[!] No valid faces loaded. Exiting...")
+if not person_Face:
+    print("No faces loaded. Exiting...")
+    exit()
 
-print(f"[**] Loaded {len(known_faces)} known face(s).")
+# === Optional Pose Model ===
+model = YOLO(POSE_MODEL)
 
-# ==== CAMERA ====
+cv2.setNumThreads(1)  # Prevent multithread tracker issues
 cap = cv2.VideoCapture(0)
 if not cap.isOpened():
     raise RuntimeError("Camera not found.")
 
-print("[*] Camera started. Press 'q' to quit.")
+state = "idle"  # idle → searching → tracking
+tracker = None
+tracking_name = None
+last_seen_time = time.time()
+person_present = False
 
-frame_count = 0
-last_seen_known_time = time.time()
-current_known_name = None
-posture_state = "Unknown"
+# === Helpers ===
+def create_tracker():
+    if hasattr(cv2, "legacy") and hasattr(cv2.legacy, "TrackerCSRT_create"):
+        return cv2.legacy.TrackerCSRT_create()
+    elif hasattr(cv2, "TrackerCSRT_create"):
+        return cv2.TrackerCSRT_create()
+    elif hasattr(cv2, "legacy") and hasattr(cv2.legacy, "TrackerKCF_create"):
+        return cv2.legacy.TrackerKCF_create()
+    elif hasattr(cv2, "TrackerKCF_create"):
+        return cv2.TrackerKCF_create()
+    else:
+        raise RuntimeError("No compatible tracker found.")
 
+def normalize_frame(frame):
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+    cl = clahe.apply(l)
+    limg = cv2.merge((cl, a, b))
+    return cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+
+def face_location_to_bbox(face_loc, frame_shape):
+    top, right, bottom, left = map(int, face_loc)
+    h, w, _ = frame_shape
+    left = max(0, min(left, w - 1))
+    top = max(0, min(top, h - 1))
+    right = max(left + 2, min(right, w - 1))
+    bottom = max(top + 2, min(bottom, h - 1))
+    width = right - left
+    height = bottom - top
+    if width < 10 or height < 10:
+        width, height = 50, 50  # ensure valid bbox
+    return (left, top, width, height)
+
+def bbox_posture(bbox, frame_h):
+    _, _, _, h = bbox
+    return "Standing" if h / float(frame_h) > 0.35 else "Sitting"
+
+print("System ready. Waiting for mouse inactivity... (Move mouse to pause)")
+
+# === Main Loop ===
 while True:
+    inactive_time = time.time() - last_mouse_move
+
+    # --- Mouse inactive: activate camera
+    if inactive_time >= MOUSE_INACTIVITY_LIMIT:
+        if not camera_enabled:
+            print("[INFO] Mouse inactive for 10s — activating camera for face check.")
+            camera_enabled = True
+            state = "searching"
+    else:
+        if camera_enabled:
+            print("[INFO] Mouse moved — deactivating camera.")
+            camera_enabled = False
+            state = "idle"
+        paused_frame = np.zeros((200, 400, 3), dtype=np.uint8)
+        cv2.putText(paused_frame, "Mouse active - paused", (10, 100),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        cv2.imshow("FRAL Face+Pose Tracking", paused_frame)
+        if cv2.waitKey(100) & 0xFF == ord('q'):
+            break
+        continue
+
+    # --- Camera active
     ret, frame = cap.read()
     if not ret:
         break
 
-    frame_count += 1
-    rgb_small = cv2.cvtColor(cv2.resize(frame, (0, 0), fx=0.37, fy=0.37), cv2.COLOR_BGR2RGB)
+    normalized_frame = normalize_frame(frame)
+    rgb_frame = cv2.cvtColor(normalized_frame, cv2.COLOR_BGR2RGB)
 
-    detected_known = False  # whether the known person is visible
+    if state == "searching":
+        face_locations = face_recognition.face_locations(rgb_frame)
+        face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
+        best_confidence, best_bbox, best_name = 0, None, None
 
-    # ==== FACE RECOGNITION ====
-    if frame_count % FACE_SKIP_FRAMES == 0:
-        face_locations = face_recognition.face_locations(rgb_small)
-        face_encodings = face_recognition.face_encodings(rgb_small, face_locations)
+        for (face_location, face_encoding) in zip(face_locations, face_encodings):
+            distances = face_recognition.face_distance(person_Face, face_encoding)
+            if not len(distances):
+                continue
+            idx = np.argmin(distances)
+            distance = float(distances[idx])
+            confidence = (1 - distance) * 100
+            name = person_Name[idx]
+            if distance <= ADAPTIVE_TOLERANCE and confidence >= MIN_CONFIDENCE:
+                if confidence > best_confidence:
+                    best_confidence, best_bbox, best_name = confidence, face_location, name
 
-        for enc in face_encodings:
-            matches = face_recognition.compare_faces(known_faces, enc)
-            face_distances = face_recognition.face_distance(known_faces, enc)
-            if face_distances.size > 0:
-                best_idx = np.argmin(face_distances)
-                if matches[best_idx]:
-                    detected_known = True
-                    current_known_name = known_names[best_idx]
-                    last_seen_known_time = time.time()
+        if best_confidence > 0 and best_bbox is not None:
+            x, y, w, h = face_location_to_bbox(best_bbox, frame.shape)
+            print(f"[DEBUG] Initializing tracker with bbox: x={x}, y={y}, w={w}, h={h}, frame={frame.shape}")
+            if w <= 0 or h <= 0:
+                print("[ERROR] Invalid bbox — skipping tracker init.")
+                continue
 
-    # ==== POSE DETECTION ====
-    results = pose_model(frame, verbose=False)
-    persons = [r for r in results if len(r.keypoints) > 0]
-
-    if not detected_known:
-        # Known person not found — check if timeout passed
-        if time.time() - last_seen_known_time > LOCK_DELAY:
-            print(f"[🔒] {current_known_name or 'Known user'} left. Locking workstation...")
-            ctypes.windll.user32.LockWorkStation()
-
-        status_text = "Known person not detected"
-        color = (0, 0, 255)
-    else:
-        # Known person found; optionally assess posture
-        if persons:
-            kps = persons[0].keypoints.xy[0]
-            if len(kps) >= 13:
-                shoulder_y = (kps[5, 1] + kps[6, 1]) / 2
-                hip_y = (kps[11, 1] + kps[12, 1]) / 2
-                ratio = (hip_y - shoulder_y) / frame.shape[0]
-                posture_state = "Standing" if ratio < 0.25 else "Sitting"
+            tracker = create_tracker()
+            ok = tracker.init(frame, (x, y, w, h))
+            if ok:
+                print(f"[+] Authorized face recognized ({best_name}, {best_confidence:.1f}%). Starting tracking.")
+                tracking_name = best_name
+                state = "tracking"
+                last_seen_time = time.time()
+                person_present = True
             else:
-                posture_state = "Unknown"
-        status_text = f"{current_known_name} detected ({posture_state})"
-        color = (0, 255, 0)
+                print("❌ Tracker init failed.")
+        else:
+            cv2.putText(frame, "No authorized face found", (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255),2)
 
-    # ==== DRAW ====
-    cv2.putText(frame, status_text, (20, 50),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-    cv2.imshow("Secure Monitor", frame)
+    elif state == "tracking":
+        ok, bbox = tracker.update(frame)
+        if ok:
+            last_seen_time = time.time()
+            person_present = True
+            x, y, w, h = map(int, bbox)
+            posture = bbox_posture((x, y, w, h), frame.shape[0])
 
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0,255,0), 2)
+            cv2.putText(frame, f"{tracking_name} - {posture}", (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0),2)
+
+            if posture == "Standing" and (x < 30 or (x + w) > frame.shape[1] - 30):
+                print("[🔒] Person leaving — locking workstation...")
+                ctypes.windll.user32.LockWorkStation()
+                lock_active = True
+                camera_enabled = False
+                state = "idle"
+                tracker = None
+                tracking_name = None
+                person_present = False
+                time.sleep(1)
+                continue
+        else:
+            cv2.putText(frame, "Tracking lost", (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255),2)
+            if person_present and (time.time() - last_seen_time > LOCK_DELAY):
+                print("[🔒] Tracking lost — locking workstation...")
+                ctypes.windll.user32.LockWorkStation()
+                lock_active = True
+                camera_enabled = False
+                state = "idle"
+                tracker = None
+                tracking_name = None
+                person_present = False
+
+    cv2.imshow("FRAL Face+Pose Tracking", frame)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
