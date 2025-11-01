@@ -6,6 +6,7 @@ import ctypes
 import numpy as np
 from ultralytics import YOLO
 
+
 # === Configuration ===
 POSE_MODEL = "yolov8n-pose.pt"  # Optional pose model
 LOCK_DELAY = 3                  # seconds before lock after loss
