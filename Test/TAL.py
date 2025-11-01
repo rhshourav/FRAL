@@ -13,7 +13,7 @@ SEARCH_RETRY_TIME = 3           # seconds to recheck after tracker loss
 CONF_THRESH = 0.5
 ADAPTIVE_TOLERANCE = 0.42
 MIN_CONFIDENCE = 55
-faces_DIR = "TranningData"
+faces_DIR = "../TranningData"
 
 # === Load known faces ===
 person_Face = []

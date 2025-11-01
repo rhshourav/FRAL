@@ -2,7 +2,7 @@ from ultralytics import YOLO
 import cv2
 
 # Load YOLOv8 model (pretrained on COCO dataset, includes "person" class)
-model = YOLO("yolov8n.pt")  # use yolov8s.pt for higher accuracy
+model = YOLO("../yolov8n.pt")  # use yolov8s.pt for higher accuracy
 
 # Initialize webcam
 cap = cv2.VideoCapture(0)

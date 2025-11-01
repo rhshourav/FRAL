@@ -5,7 +5,7 @@ import numpy as np
 import time
 
 # ====== FOLDER CONTAINING FACES ======
-faces_DIR = "TranningData"
+faces_DIR = "../TranningData"
 
 person_Face = []
 person_Name = []

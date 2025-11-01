@@ -7,7 +7,7 @@ import face_recognition
 from ultralytics import YOLO
 
 # ==== CONFIG ====
-FACES_DIR = "TranningData"           # folder with known face(s)
+FACES_DIR = "../TranningData"  # folder with known face(s)
 POSE_MODEL = "yolov8n-pose.pt"       # lightweight pose model
 LOCK_DELAY = 5                       # seconds after known person leaves
 FACE_SKIP_FRAMES = 2                 # process face every N frames

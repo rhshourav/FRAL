@@ -7,7 +7,7 @@ import face_recognition
 from ultralytics import YOLO
 
 # ==== CONFIGURATION ====
-FACES_DIR = "TranningData"
+FACES_DIR = "../TranningData"
 POSE_MODEL = "yolov8n-pose.pt"
 CONF_THRESH = 0.5
 LOCK_DELAY = 5
